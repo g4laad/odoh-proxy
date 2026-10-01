@@ -284,6 +284,58 @@ async fn odoh_binary_forwards_both_uri_templates_without_allowlist() {
     relay.wait().await.unwrap();
     let rebound = TcpListener::bind(addr).await.unwrap();
     drop(rebound);
+    let (mut restricted, restricted_addr) = launch(
+        env!("CARGO_BIN_EXE_odoh-proxy"),
+        &[
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--target-ca-cert".into(),
+            ca.to_str().unwrap().into(),
+            "--allowed-target".into(),
+            format!("LOCALHOST:{port}"),
+        ],
+    )
+    .await;
+    for url in [
+        format!("http://{restricted_addr}/dns-query?{valid}"),
+        format!("http://{restricted_addr}/localhost:{port}/dns-query"),
+    ] {
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/oblivious-dns-message")
+            .body(bytes.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), bytes);
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 9);
+    for url in [
+        format!(
+            "http://{restricted_addr}/dns-query?targethost=localhost%3A{}&targetpath=%2Fdns-query",
+            port + 1
+        ),
+        format!("http://{restricted_addr}/127.0.0.1:{port}/dns-query"),
+    ] {
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/oblivious-dns-message")
+            .body(bytes.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        assert_eq!(
+            response.headers()["proxy-status"],
+            "odoh-proxy; error=http_request_denied"
+        );
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(response.bytes().await.unwrap().is_empty());
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 9);
+    restricted.start_kill().unwrap();
+    restricted.wait().await.unwrap();
     server.abort();
 }
 
@@ -299,6 +351,24 @@ async fn invalid_configuration_and_bind_failures_exit_nonzero() {
             "/nonexistent/private-ca.pem".into(),
         ],
         vec!["--listen".into(), tcp.local_addr().unwrap().to_string()],
+        vec![
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--allowed-target".into(),
+            "https://localhost".into(),
+        ],
+        vec![
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--max-requests-per-second".into(),
+            "0".into(),
+        ],
+        vec![
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--max-in-flight".into(),
+            "0".into(),
+        ],
     ] {
         let status = Command::new(env!("CARGO_BIN_EXE_odoh-proxy"))
             .args(args)

@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -11,6 +16,7 @@ use axum::{
 use clap::Parser;
 use reqwest::{Client, Url, redirect::Policy};
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 
 const MEDIA_TYPE: &str = "application/oblivious-dns-message";
 const MAX_BODY: usize = 256 * 1024;
@@ -25,6 +31,23 @@ struct Args {
     listen: SocketAddr,
     #[arg(long, help = "Additional PEM CA certificate for private HTTPS targets")]
     target_ca_cert: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Allowed HTTPS target HOST[:PORT] (repeatable; default: all)"
+    )]
+    allowed_target: Vec<String>,
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Global request admission rate per second"
+    )]
+    max_requests_per_second: u32,
+    #[arg(
+        long,
+        default_value_t = 128,
+        help = "Maximum concurrent forwarded requests"
+    )]
+    max_in_flight: usize,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +60,29 @@ struct TargetParams {
 #[derive(Clone)]
 struct AppState {
     client: Client,
+    allowed_targets: Arc<Vec<(String, u16)>>,
+    in_flight: Arc<Semaphore>,
+    rate: Arc<Mutex<TokenBucket>>,
+}
+
+struct TokenBucket {
+    tokens: f64,
+    rate: f64,
+    updated: Instant,
+}
+
+impl TokenBucket {
+    fn admit(&mut self) -> bool {
+        let now = Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.updated).as_secs_f64() * self.rate)
+            .min(self.rate);
+        self.updated = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
 }
 
 fn authority(raw: &str) -> Option<(String, u16)> {
@@ -92,6 +138,16 @@ fn encoded_query_is_valid(raw: &str) -> bool {
     true
 }
 
+impl AppState {
+    fn permits_target(&self, target: &Url) -> bool {
+        self.allowed_targets.is_empty()
+            || self.allowed_targets.iter().any(|(host, port)| {
+                target.host_str() == Some(host.as_str())
+                    && target.port_or_known_default() == Some(*port)
+            })
+    }
+}
+
 async fn handle_query(
     State(state): State<AppState>,
     targetparams: Result<Query<TargetParams>, QueryRejection>,
@@ -109,6 +165,9 @@ async fn handle_query(
     let Some(target) = target_url(&targetparams.targethost, &targetparams.targetpath) else {
         return error(StatusCode::BAD_REQUEST, "http_request_error");
     };
+    if !state.permits_target(&target) {
+        return error(StatusCode::FORBIDDEN, "http_request_denied");
+    }
     forward(state, target, request).await
 }
 
@@ -124,6 +183,9 @@ async fn handle_path(
     let Some(target) = target_url(&host, &path) else {
         return error(StatusCode::BAD_REQUEST, "http_request_error");
     };
+    if !state.permits_target(&target) {
+        return error(StatusCode::FORBIDDEN, "http_request_denied");
+    }
     forward(state, target, request).await
 }
 
@@ -169,6 +231,17 @@ async fn forward(state: AppState, target: Url, request: Request) -> Response {
             != 1
     {
         return error(StatusCode::BAD_REQUEST, "http_request_error");
+    }
+    let Ok(_permit) = state.in_flight.clone().try_acquire_owned() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "proxy_internal_response");
+    };
+    if !state
+        .rate
+        .lock()
+        .expect("token bucket mutex poisoned")
+        .admit()
+    {
+        return error(StatusCode::TOO_MANY_REQUESTS, "http_request_denied");
     }
     // The target URI is validated before the body is read.
     let body = match to_bytes(request.into_body(), MAX_BODY).await {
@@ -221,6 +294,16 @@ async fn forward(state: AppState, target: Url, request: Request) -> Response {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    anyhow::ensure!(
+        args.max_requests_per_second > 0,
+        "--max-requests-per-second must be positive"
+    );
+    anyhow::ensure!(args.max_in_flight > 0, "--max-in-flight must be positive");
+    let allowed_targets = args
+        .allowed_target
+        .iter()
+        .map(|raw| authority(raw).with_context(|| format!("invalid --allowed-target: {raw}")))
+        .collect::<Result<Vec<_>>>()?;
 
     let mut builder = Client::builder()
         .https_only(true)
@@ -238,6 +321,13 @@ async fn main() -> Result<()> {
     }
     let state = AppState {
         client: builder.build().context("build HTTPS target client")?,
+        allowed_targets: Arc::new(allowed_targets),
+        in_flight: Arc::new(Semaphore::new(args.max_in_flight)),
+        rate: Arc::new(Mutex::new(TokenBucket {
+            tokens: f64::from(args.max_requests_per_second),
+            rate: f64::from(args.max_requests_per_second),
+            updated: Instant::now(),
+        })),
     };
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("register SIGTERM handler")?;
