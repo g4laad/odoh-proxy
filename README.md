@@ -13,6 +13,8 @@ sudo install -m 0755 target/release/odoh-proxy /usr/local/bin/odoh-proxy
 sudo install -m 0644 deploy/odoh-proxy.service /etc/systemd/system/
 ```
 
+The standard test suite uses a local HTTPS target. To additionally verify a real encrypted DNS round trip through the proxy to Cloudflare's ODoH target, run `cargo test --test cloudflare_odoh -- --ignored`. This opt-in test fetches live ODoH key configuration, requires outbound HTTPS to `odoh.cloudflare-dns.com`, and depends on the target's availability.
+
 The unit uses `DynamicUser=yes`, no capabilities, and binds HTTP to `127.0.0.1:8053` by default. `--listen` also accepts non-loopback addresses (for example, `0.0.0.0:8053`); adjust the service's `ExecStart` or invoke the binary directly when deploying behind a remote TLS terminator. **Never expose the HTTP listener directly to the public internet:** restrict access to the trusted terminator with firewall rules or a private network. Configure the terminator with a trusted certificate for a public DNS name, routing both `/dns-query` and `/{targethost}/{targetpath}` requests to the relay. Ensure the terminator and any external CDN or logging infrastructure meet your privacy policy; avoid logging client addresses or DNS payloads.
 
 ```sh
