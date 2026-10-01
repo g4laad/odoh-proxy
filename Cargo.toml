@@ -1,0 +1,26 @@
+[package]
+name = "odoh-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+
+[dev-dependencies]
+rcgen = "0.13"
+tokio-rustls = "0.26"
+tempfile = "3"
