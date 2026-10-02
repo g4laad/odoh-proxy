@@ -34,3 +34,10 @@ Clients need the target public key and either RFC 9230 proxy URI template: `http
 The binary prints `LISTENING <bound-address>` to stdout once bound. Diagnostics go to stderr without client addresses or payloads. Ctrl-C/SIGTERM stops it; bind/configuration errors exit nonzero. Request and response bodies are limited to 256 KiB.
 
 Responses include `Cache-Control: no-store` and a `Proxy-Status` identifying `odoh-proxy`. Forwarded responses report `received-status`; relay-generated failures (including malformed query parameters) report an `error` code with an empty body.
+
+## GitHub CI and releases
+
+Every push and pull request runs formatting, Clippy, and the local test suite with the committed `Cargo.lock`. The live Cloudflare test remains opt-in and is not run in CI.
+
+To publish a release, update the version in `Cargo.toml` and push a matching `v<version>` tag (for example, `v0.1.0`). After the checks pass, GitHub Actions builds the release binary on Ubuntu 24.04 x86-64 and publishes a Linux x86-64 GNU tarball and `SHA256SUMS` to a GitHub Release. Verify a downloaded tarball with `sha256sum -c SHA256SUMS` from the download directory. The archive contains the binary; install it and the systemd unit using the commands above. Releases do not deploy to a server automatically: TLS termination, egress restrictions, and the service configuration remain operator-managed. The binary is dynamically linked against the Ubuntu 24.04 system libraries; use `cargo build --release` on other platforms or older Linux distributions.
+

@@ -1,4 +1,4 @@
-//! Opt-in end-to-end check requiring outbound HTTPS to Cloudflare's ODoH target.
+//! Opt-in end-to-end check requiring outbound HTTPS to Cloudflare's `ODoH` target.
 
 use odoh_rs::{
     ObliviousDoHConfigs, ObliviousDoHMessagePlaintext, compose, decrypt_response, encrypt_query,
